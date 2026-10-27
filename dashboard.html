@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portachaves - Painel de Gestão</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 40px auto; padding: 20px; color: #333; }
+    form { display: flex; gap: 8px; flex-wrap: wrap; }
+    input, button { padding: 9px; font: inherit; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+    th { background: #f6f8fa; }
+    button { cursor: pointer; } button:disabled { cursor: wait; opacity: .6; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Famílias interessadas</h1>
+  <form id="loginForm">
+    <label>Email de administrador <input id="adminEmail" type="email" autocomplete="email" required></label>
+    <button type="submit">Receber link de acesso</button>
+  </form>
+  <section id="panel" hidden>
+    <button id="logout" type="button">Terminar sessão</button>
+    <h2>Visibilidade da renda</h2>
+    <p>Registe aqui a escolha do proprietário para cada imóvel.</p>
+    <div id="propertyVisibility"></div>
+    <h2>Interesses recebidos</h2>
+    <table><thead><tr><th>Nome</th><th>Imóvel</th><th>Rendimento</th><th>Renda pretendida</th><th>Taxa de esforço</th><th>Situação profissional</th><th>Nacionalidade</th><th>Documentação</th><th>Estado</th><th>Ações</th></tr></thead><tbody id="applicationsBody"></tbody></table>
+  </section>
+  <p id="feedback" role="status" aria-live="polite"></p>
+  <script>
+    const loginForm = document.getElementById('loginForm');
+    const panel = document.getElementById('panel');
+    const feedback = document.getElementById('feedback');
+    const tbody = document.getElementById('applicationsBody');
+    const propertyVisibility = document.getElementById('propertyVisibility');
+
+    async function loadProperties() {
+      const { data, error } = await db.from('properties')
+        .select('id,title,show_rent').order('created_at', { ascending: false });
+      if (error) throw error;
+      propertyVisibility.replaceChildren();
+      for (const property of data) {
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = property.show_rent;
+        checkbox.addEventListener('change', async () => {
+          checkbox.disabled = true;
+          const { error: updateError } = await db.from('properties')
+            .update({ show_rent: checkbox.checked }).eq('id', property.id);
+          if (updateError) {
+            checkbox.checked = !checkbox.checked;
+            feedback.textContent = 'Não foi possível atualizar a visibilidade: ' + updateError.message;
+          } else feedback.textContent = 'Escolha do proprietário guardada.';
+          checkbox.disabled = false;
+        });
+        label.append(checkbox, document.createTextNode(' Mostrar renda de ' + (property.title || 'imóvel sem título')));
+        propertyVisibility.append(label, document.createElement('br'));
+      }
+      if (!data.length) propertyVisibility.textContent = 'Ainda não há imóveis.';
+    }
+
+    function cell(row, value) {
+      const td = row.insertCell();
+      td.textContent = value == null ? '—' : String(value);
+    }
+
+    async function changeStatus(id, status) {
+      const { error } = await db.from('applications').update({ status }).eq('id', id);
+      if (error) throw error;
+      await loadApplications();
+    }
+
+    async function sendNotice(app, action, message) {
+      if (action === 'request_info') {
+        const link = new URL('documents.html', location.href);
+        link.searchParams.set('application_id', app.id);
+        const suffix = '\n\nEnvie os documentos solicitados nesta página segura do Portachaves: ' + link.href;
+        if (message.length + suffix.length > 2000) throw new Error('Mensagem demasiado longa para incluir o link.');
+        message += suffix;
+      }
+      const { data, error } = await db.functions.invoke('application-notice', {
+        body: { application_id: app.id, action, message }
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      await loadApplications();
+    }
+
+    function action(container, label, handler) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        feedback.textContent = 'A processar...';
+        try {
+          await handler();
+          feedback.textContent = 'Ação concluída.';
+        } catch (error) {
+          feedback.textContent = 'Falha: ' + error.message;
+        } finally {
+          button.disabled = false;
+        }
+      });
+      container.appendChild(button);
+    }
+
+    async function showDocuments(applicationId, container) {
+      const {data,error}=await db.storage.from('application-documents').list(applicationId,{limit:100});
+      if (error) throw error;
+      const list=document.createElement('div');
+      if (!data.length) list.textContent='Ainda sem documentos.';
+      for (const file of data) {
+        const path=applicationId+'/'+file.name;
+        const {data:signed,error:signError}=await db.storage.from('application-documents')
+          .createSignedUrl(path,600);
+        if (signError) throw signError;
+        const link=document.createElement('a');
+        link.href=signed.signedUrl;
+        link.target='_blank';link.rel='noopener noreferrer';
+        link.textContent=file.name.replace(/^[0-9a-f-]{36}-/i,'');
+        list.append(link,document.createElement('br'));
+      }
+      container.append(list);
+    }
+
+    async function loadApplications() {
+      const { data, error } = await db.from('applications')
+        .select('id,status,profiles(full_name,email,phone,monthly_income,employment_type,nationality,document_status,rent_budget_min,rent_budget_max),properties(title,monthly_rent,landlord_email)')
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      tbody.replaceChildren();
+      for (const app of data) {
+        const profile = app.profiles;
+        const property = app.properties;
+        if (!profile || !property) continue;
+        const tr = tbody.insertRow();
+        cell(tr, profile.full_name);
+        cell(tr, property.title);
+        cell(tr, `${profile.monthly_income} €`);
+        cell(tr, profile.rent_budget_min == null || profile.rent_budget_max == null ?
+          '—' : `${profile.rent_budget_min}–${profile.rent_budget_max} €`);
+        const income = Number(profile.monthly_income);
+        const rent = Number(property.monthly_rent);
+        cell(tr, income > 0 && Number.isFinite(rent) ? `${(rent / income * 100).toFixed(1)}%` : '—');
+        cell(tr, profile.employment_type);
+        cell(tr, profile.nationality);
+        cell(tr, ({sem_autorizacao:'Sem autorização',temporaria:'Autorização temporária',permanente:'Autorização permanente'})[profile.document_status] || '—');
+        cell(tr, app.status);
+        const buttons = tr.insertCell();
+        action(buttons, 'Solicitar info', async () => {
+          const message = prompt('Mensagem para o candidato:');
+          if (message?.trim()) await sendNotice(app, 'request_info', message.trim());
+        });
+        action(buttons, 'Contactar', () => sendNotice(app, 'match'));
+        action(buttons, 'Documentos', () => showDocuments(app.id, buttons));
+        action(buttons, 'Remover', () => changeStatus(app.id, 'removed'));
+      }
+      if (data.length === 0) feedback.textContent = 'Ainda não há famílias interessadas.';
+    }
+
+    async function checkSession() {
+      const { data: { session }, error } = await db.auth.getSession();
+      if (error) throw error;
+      if (!session) {
+        panel.hidden = true;
+        loginForm.hidden = false;
+        return;
+      }
+      const { data: admin, error: adminError } = await db.from('admins').select('user_id').eq('user_id', session.user.id).maybeSingle();
+      if (adminError) throw adminError;
+      if (!admin) {
+        await db.auth.signOut();
+        throw new Error('Esta conta não tem acesso ao painel.');
+      }
+      loginForm.hidden = true;
+      panel.hidden = false;
+      await loadProperties();
+      await loadApplications();
+    }
+
+    loginForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = loginForm.querySelector('button');
+      button.disabled = true;
+      try {
+        const email = document.getElementById('adminEmail').value.trim();
+        const { error } = await db.auth.signInWithOtp({
+          email, options: { emailRedirectTo: new URL('dashboard.html', location.href).href, shouldCreateUser: false }
+        });
+        if (error) throw error;
+        feedback.textContent = 'Se o endereço estiver autorizado, receberá um link de acesso.';
+      } catch (error) {
+        feedback.textContent = 'Não foi possível enviar o link: ' + error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    document.getElementById('logout').addEventListener('click', async () => {
+      await db.auth.signOut();
+      panel.hidden = true;
+      loginForm.hidden = false;
+      feedback.textContent = 'Sessão terminada.';
+    });
+    checkSession().catch(error => { feedback.textContent = error.message; });
+  </script>
+</body>
+</html>

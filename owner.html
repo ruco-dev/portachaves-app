@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portachaves — Área do proprietário</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="config.js"></script>
+  <style>
+    body{font-family:system-ui,sans-serif;max-width:650px;margin:40px auto;padding:20px;color:#333}
+    form{display:flex;flex-direction:column;gap:12px}input,textarea,button{padding:10px;font:inherit}
+    button{cursor:pointer}button:disabled{opacity:.6;cursor:wait}
+    article{border:1px solid #ddd;border-radius:8px;padding:18px;margin:14px 0}
+    [hidden]{display:none!important}
+  </style>
+</head>
+<body>
+  <nav><a href="index.html">Portachaves</a></nav>
+  <h1>Área do proprietário</h1>
+  <p>Crie, edite, publique ou retire os seus imóveis. Decida também se a renda é mostrada aos candidatos; quando oculta, pode continuar a servir para filtrar pelo intervalo pretendido.</p>
+  <section id="loginSection">
+    <form id="loginForm">
+      <label>Email associado ao imóvel <input id="email" type="email" autocomplete="email" required></label>
+      <button type="submit">Receber link de acesso</button>
+    </form>
+  </section>
+  <section id="ownerSection" hidden>
+    <p id="signedInAs"></p><button id="logout" type="button">Terminar sessão</button>
+    <h2>Adicionar imóvel</h2>
+    <form id="newPropertyForm">
+      <label>Título <input name="title" maxlength="160" required></label>
+      <label>Localização <input name="location" maxlength="160" required></label>
+      <label>Descrição <textarea name="description" maxlength="3000" rows="4"></textarea></label>
+      <label>Renda mensal (€) <input name="rent" type="number" min="1" step="0.01" required></label>
+      <label><input name="showRent" type="checkbox"> Mostrar renda aos candidatos</label>
+      <button type="submit">Criar rascunho</button>
+    </form>
+    <h2>Os meus imóveis</h2>
+    <div id="properties"></div>
+  </section>
+  <p id="feedback" role="status" aria-live="polite"></p>
+  <script>
+    const feedback=document.getElementById('feedback');
+    const loginSection=document.getElementById('loginSection');
+    const ownerSection=document.getElementById('ownerSection');
+    const properties=document.getElementById('properties');
+    const newPropertyForm=document.getElementById('newPropertyForm');
+    function field(labelText,value,type='text') {
+      const label=document.createElement('label');
+      label.textContent=labelText+' ';
+      const input=document.createElement(type==='textarea'?'textarea':'input');
+      if (type!=='textarea') input.type=type;
+      input.value=value??'';
+      input.required=type!=='textarea';
+      if (type==='number') { input.min='1'; input.step='0.01'; }
+      if (type==='textarea') input.maxLength=3000;
+      else if (type==='text') input.maxLength=160;
+      label.append(input);
+      return {label,input};
+    }
+    function propertyPayload(form) {
+      const get=name=>form.elements.namedItem(name);
+      return {
+        p_title:get('title').value.trim(),
+        p_location:get('location').value.trim(),
+        p_description:get('description').value.trim(),
+        p_monthly_rent:Number(get('rent').value),
+        p_show_rent:get('showRent').checked
+      };
+    }
+    function renderProperty(property) {
+      const card=document.createElement('article');
+      const heading=document.createElement('h3');
+      heading.textContent=property.title || 'Imóvel sem título';
+      card.append(heading);
+      const state=document.createElement('p');
+      state.textContent=property.is_active?'Publicado':'Rascunho / retirado';
+      card.append(state);
+      const form=document.createElement('form');
+      const title=field('Título',property.title);
+      const locationField=field('Localização',property.location);
+      const description=field('Descrição',property.description,'textarea');
+      const rent=field('Renda mensal (€)',property.monthly_rent,'number');
+      title.input.name='title';locationField.input.name='location';
+      description.input.name='description';rent.input.name='rent';
+      form.append(title.label,locationField.label,description.label,rent.label);
+      const showLabel=document.createElement('label');
+      const show=document.createElement('input');
+      show.type='checkbox';show.name='showRent';show.checked=property.show_rent;
+      showLabel.append(show,document.createTextNode(' Mostrar renda aos candidatos'));
+      form.append(showLabel);
+      const save=document.createElement('button');
+      save.type='submit';save.textContent='Guardar alterações';
+      form.append(save);
+      form.addEventListener('submit',async event=>{
+        event.preventDefault();save.disabled=true;
+        try {
+          const {error}=await db.rpc('save_my_property',{
+            p_property_id:property.id,...propertyPayload(form)
+          });
+          if (error) throw error;
+          heading.textContent=title.input.value.trim();
+          feedback.textContent='Imóvel atualizado.';
+        } catch(error) {feedback.textContent='Não foi possível guardar: '+error.message;}
+        finally {save.disabled=false;}
+      });
+      card.append(form);
+      const publish=document.createElement('button');
+      publish.type='button';
+      publish.textContent=property.is_active?'Retirar publicação':'Publicar imóvel';
+      const link=document.createElement('a');
+      link.href='index.html?property_id='+encodeURIComponent(property.id);
+      link.textContent='Ver link para candidatos';
+      link.hidden=!property.is_active;
+      publish.addEventListener('click',async()=>{
+        publish.disabled=true;
+        try {
+          const next=!property.is_active;
+          if (next) {
+            const {error:saveError}=await db.rpc('save_my_property',{
+              p_property_id:property.id,...propertyPayload(form)
+            });
+            if (saveError) throw saveError;
+            heading.textContent=title.input.value.trim();
+          }
+          const {error}=await db.rpc('set_my_property_published',{
+            p_property_id:property.id,p_published:next
+          });
+          if (error) throw error;
+          property.is_active=next;
+          state.textContent=next?'Publicado':'Rascunho / retirado';
+          publish.textContent=next?'Retirar publicação':'Publicar imóvel';
+          link.hidden=!next;
+          feedback.textContent=next?'Imóvel publicado.':'Imóvel retirado do catálogo.';
+        } catch(error) {feedback.textContent='Não foi possível alterar a publicação: '+error.message;}
+        finally {publish.disabled=false;}
+      });
+      card.append(publish,document.createTextNode(' '),link);
+      return card;
+    }
+    async function load() {
+      const {data:{session},error:sessionError}=await db.auth.getSession();
+      if (sessionError) throw sessionError;
+      loginSection.hidden=Boolean(session);ownerSection.hidden=!session;
+      if (!session) return;
+      document.getElementById('signedInAs').textContent=session.user.email;
+      const {data,error}=await db.rpc('list_my_properties');
+      if (error) throw error;
+      properties.replaceChildren();
+      for (const property of data) properties.append(renderProperty(property));
+      if (!data.length) feedback.textContent='Ainda não há imóveis associados a este email. Crie um rascunho acima.';
+    }
+    newPropertyForm.addEventListener('submit',async event=>{
+      event.preventDefault();
+      const button=newPropertyForm.querySelector('button[type="submit"]');
+      button.disabled=true;
+      try {
+        const {data,error}=await db.rpc('create_my_property',propertyPayload(newPropertyForm));
+        if (error) throw error;
+        if (!data) throw new Error('Imóvel não criado');
+        newPropertyForm.reset();
+        await load();
+        feedback.textContent='Rascunho criado. Revise e publique quando estiver pronto.';
+      } catch(error) {feedback.textContent='Não foi possível criar: '+error.message;}
+      finally {button.disabled=false;}
+    });
+    document.getElementById('loginForm').addEventListener('submit',async event=>{
+      event.preventDefault();const button=event.currentTarget.querySelector('button');button.disabled=true;
+      try {
+        const {error}=await db.auth.signInWithOtp({
+          email:document.getElementById('email').value.trim(),
+          options:{emailRedirectTo:location.href}
+        });
+        if (error) throw error;
+        feedback.textContent='Enviámos um link de acesso para o seu email.';
+      } catch(error) {feedback.textContent='Não foi possível enviar o link: '+error.message;}
+      finally {button.disabled=false;}
+    });
+    document.getElementById('logout').addEventListener('click',async()=>{
+      await db.auth.signOut();location.reload();
+    });
+    load().catch(error=>{feedback.textContent='Não foi possível carregar os imóveis: '+error.message;});
+  </script>
+</body>
+</html>

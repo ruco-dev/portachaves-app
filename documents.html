@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portachaves — Enviar documentos</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="config.js"></script>
+  <style>
+    body{font-family:system-ui,sans-serif;max-width:600px;margin:40px auto;padding:20px;color:#333}
+    form{display:flex;flex-direction:column;gap:12px}input,button{padding:10px;font:inherit}
+    button{cursor:pointer}button:disabled{opacity:.6;cursor:wait}
+    [hidden]{display:none!important}#requestText{white-space:pre-wrap}
+  </style>
+</head>
+<body>
+  <nav><a href="properties.html">Imóveis</a></nav>
+  <h1>Enviar documentos</h1>
+  <section id="loginSection" hidden>
+    <p>Entre com o mesmo email usado na inscrição para enviar os documentos pedidos.</p>
+    <form id="loginForm">
+      <label>Email <input id="email" type="email" autocomplete="email" required></label>
+      <button type="submit">Receber link de acesso</button>
+    </form>
+  </section>
+  <section id="uploadSection" hidden>
+    <p id="requestText"></p>
+    <form id="uploadForm">
+      <label>Documentos (PDF, JPG ou PNG, até 10 MB por ficheiro)
+        <input id="files" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" multiple required>
+      </label>
+      <button type="submit">Enviar documentos</button>
+    </form>
+    <h2>Ficheiros enviados</h2>
+    <ul id="fileList"></ul>
+  </section>
+  <p id="feedback" role="status" aria-live="polite"></p>
+  <script>
+    const applicationId=new URLSearchParams(location.search).get('application_id');
+    const loginSection=document.getElementById('loginSection');
+    const uploadSection=document.getElementById('uploadSection');
+    const feedback=document.getElementById('feedback');
+    const bucket=db.storage.from('application-documents');
+    const fileList=document.getElementById('fileList');
+    const allowed=new Set(['application/pdf','image/jpeg','image/png']);
+    async function listFiles() {
+      const {data,error}=await bucket.list(applicationId,{limit:100});
+      if (error) throw error;
+      fileList.replaceChildren();
+      for (const file of data) {
+        const li=document.createElement('li');
+        li.textContent=file.name.replace(/^[0-9a-f-]{36}-/i,'');
+        fileList.append(li);
+      }
+      if (!data.length) {
+        const li=document.createElement('li');
+        li.textContent='Ainda não há documentos enviados.';
+        fileList.append(li);
+      }
+    }
+    async function load() {
+      if (!/^[0-9a-f-]{36}$/i.test(applicationId||'')) {
+        feedback.textContent='Link de documentos inválido.';return;
+      }
+      const {data:{session},error:sessionError}=await db.auth.getSession();
+      if (sessionError) throw sessionError;
+      loginSection.hidden=Boolean(session);
+      if (!session) return;
+      const {data:application,error}=await db.from('applications')
+        .select('id,status,anonymous_message').eq('id',applicationId).maybeSingle();
+      if (error) throw error;
+      if (!application) {feedback.textContent='Este pedido não está associado à sua inscrição.';return;}
+      if (application.status!=='info_requested') {
+        feedback.textContent='Este pedido não está aberto para envio de documentos.';return;
+      }
+      document.getElementById('requestText').textContent=
+        application.anonymous_message || 'Envie os documentos solicitados pela equipa.';
+      uploadSection.hidden=false;
+      await listFiles();
+    }
+    document.getElementById('loginForm').addEventListener('submit',async event=>{
+      event.preventDefault();
+      const button=event.currentTarget.querySelector('button');button.disabled=true;
+      try {
+        const {error}=await db.auth.signInWithOtp({
+          email:document.getElementById('email').value.trim(),
+          options:{emailRedirectTo:location.href,shouldCreateUser:false}
+        });
+        if (error) throw error;
+        feedback.textContent='Enviámos um link de acesso para o seu email.';
+      } catch(error) {feedback.textContent='Não foi possível enviar o link: '+error.message;}
+      finally {button.disabled=false;}
+    });
+    document.getElementById('uploadForm').addEventListener('submit',async event=>{
+      event.preventDefault();
+      const form=event.currentTarget;
+      const button=form.querySelector('button');
+      const files=[...document.getElementById('files').files];
+      if (!files.length) return;
+      if (files.some(file=>!allowed.has(file.type)||file.size>10*1024*1024||file.size===0)) {
+        feedback.textContent='Escolha apenas ficheiros PDF, JPG ou PNG até 10 MB.';return;
+      }
+      button.disabled=true;
+      try {
+        for (const file of files) {
+          const safeName=file.name.replace(/[^a-zA-Z0-9._-]/g,'_').slice(0,100)||'documento';
+          const path=applicationId+'/'+crypto.randomUUID()+'-'+safeName;
+          const {error}=await bucket.upload(path,file,{contentType:file.type,upsert:false});
+          if (error) throw error;
+        }
+        form.reset();
+        await listFiles();
+        feedback.textContent='Documentos enviados com sucesso.';
+      } catch(error) {feedback.textContent='Não foi possível enviar: '+error.message;}
+      finally {button.disabled=false;}
+    });
+    load().catch(error=>{feedback.textContent='Não foi possível abrir o pedido: '+error.message;});
+  </script>
+</body>
+</html>

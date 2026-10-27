@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portachaves — Inscrição</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="config.js"></script>
+  <style>
+    body{font-family:system-ui,sans-serif;max-width:520px;margin:40px auto;padding:20px;color:#333}
+    form{display:flex;flex-direction:column;gap:12px}input,select,button{padding:12px;font:inherit;border:1px solid #ccc;border-radius:6px}
+    button{background:#111;color:white;border:0;cursor:pointer;font-weight:600}button:disabled{opacity:.6;cursor:wait}
+    [hidden]{display:none!important}
+  </style>
+</head>
+<body>
+  <nav><a href="owner.html">Área do proprietário</a> · <a href="dashboard.html">Painel de gestão</a></nav>
+  <h1>Portachaves</h1>
+  <p>Inscreva o seu agregado uma vez. Depois, marque interesse nos imóveis que lhe agradam.</p>
+  <section id="loginSection">
+    <h2>Entrar ou inscrever-se</h2>
+    <form id="loginForm">
+      <label>Email <input id="email" type="email" autocomplete="email" required></label>
+      <button type="submit">Receber link de acesso</button>
+    </form>
+  </section>
+  <section id="memberSection" hidden>
+    <p id="signedInAs"></p><button id="logout" type="button">Terminar sessão</button>
+    <h2>Dados do agregado</h2>
+    <form id="profileForm">
+      <label>Nome completo <input id="name" type="text" autocomplete="name" required></label>
+      <label>Telemóvel <input id="phone" type="tel" autocomplete="tel" required></label>
+      <label>Rendimento líquido mensal (€) <input id="income" type="number" min="1" step="0.01" required></label>
+      <label>Pessoas no agregado <input id="occupants" type="number" min="1" step="1" required></label>
+      <label>Situação profissional <select id="employment">
+        <option value="Efetivo">Contrato efetivo</option><option value="Recibos Verdes">Recibos verdes / independente</option>
+        <option value="Estudante">Estudante / outro</option>
+      </select></label>
+      <label>Nacionalidade <input id="nationality" type="text" maxlength="80" autocomplete="off" required></label>
+      <label>Situação documental para arrendamento <select id="documentStatus" required>
+        <option value="">Selecione</option>
+        <option value="sem_autorizacao">Sem autorização de residência</option>
+        <option value="temporaria">Com autorização de residência temporária</option>
+        <option value="permanente">Com autorização de residência permanente</option>
+      </select></label>
+      <label>Renda mensal mínima que procura (€) <input id="rentBudgetMin" type="number" min="1" step="0.01" required></label>
+      <label>Renda mensal máxima que pretende pagar (€) <input id="rentBudgetMax" type="number" min="1" step="0.01" required></label>
+      <p>A situação documental não é usada para selecionar automaticamente imóveis. O intervalo de renda ajuda a filtrar resultados.</p>
+      <button type="submit">Guardar e ver imóveis</button>
+    </form>
+  </section>
+  <p id="feedback" role="status" aria-live="polite"></p>
+  <script>
+    const propertyId = new URLSearchParams(location.search).get('property_id');
+    const loginSection = document.getElementById('loginSection');
+    const memberSection = document.getElementById('memberSection');
+    const feedback = document.getElementById('feedback');
+    const catalogUrl = () => 'properties.html' + (propertyId ? '?property_id=' + encodeURIComponent(propertyId) : '');
+    async function checkSession() {
+      const {data:{session},error} = await db.auth.getSession();
+      if (error) throw error;
+      loginSection.hidden = Boolean(session); memberSection.hidden = !session;
+      if (!session) return;
+      document.getElementById('signedInAs').textContent = session.user.email;
+      const {data:profile,error:profileError} = await db.from('profiles')
+        .select('id,full_name,phone,monthly_income,occupants_count,employment_type,nationality,document_status,rent_budget_min,rent_budget_max')
+        .eq('user_id',session.user.id).maybeSingle();
+      if (profileError) throw profileError;
+      if (profile?.nationality && ['sem_autorizacao','temporaria','permanente'].includes(profile?.document_status) &&
+          profile?.rent_budget_min && profile?.rent_budget_max &&
+          new URLSearchParams(location.search).get('editar') !== '1') {
+        location.replace(catalogUrl()); return;
+      }
+      if (profile) {
+        for (const [field,value] of Object.entries({
+          name:profile.full_name,phone:profile.phone,income:profile.monthly_income,
+          occupants:profile.occupants_count,employment:profile.employment_type,
+          nationality:profile.nationality,documentStatus:profile.document_status,
+          rentBudgetMin:profile.rent_budget_min,rentBudgetMax:profile.rent_budget_max
+        })) document.getElementById(field).value = value ?? '';
+      }
+      if (propertyId) feedback.textContent = 'Guarde a inscrição para ver os imóveis. O imóvel do seu link aparecerá em destaque.';
+    }
+    document.getElementById('loginForm').addEventListener('submit',async event => {
+      event.preventDefault(); const button = event.currentTarget.querySelector('button'); button.disabled = true;
+      try {
+        const {error} = await db.auth.signInWithOtp({
+          email:document.getElementById('email').value.trim(),options:{emailRedirectTo:location.href}
+        });
+        if (error) throw error;
+        feedback.textContent = 'Enviámos um link de acesso para o seu email.';
+      } catch(error) { feedback.textContent = 'Não foi possível enviar o link: ' + error.message; }
+      finally { button.disabled = false; }
+    });
+    document.getElementById('profileForm').addEventListener('submit',async event => {
+      event.preventDefault(); const button = event.currentTarget.querySelector('button'); button.disabled = true;
+      try {
+        const min=Number(document.getElementById('rentBudgetMin').value);
+        const max=Number(document.getElementById('rentBudgetMax').value);
+        if (max<min) throw new Error('A renda máxima deve ser igual ou superior à mínima.');
+        const {data,error} = await db.rpc('save_family_profile',{
+          p_full_name:document.getElementById('name').value.trim(),
+          p_phone:document.getElementById('phone').value.trim(),
+          p_monthly_income:Number(document.getElementById('income').value),
+          p_occupants_count:Number(document.getElementById('occupants').value),
+          p_employment_type:document.getElementById('employment').value,
+          p_nationality:document.getElementById('nationality').value.trim(),
+          p_document_status:document.getElementById('documentStatus').value,
+          p_rent_budget_min:min,p_rent_budget_max:max
+        });
+        if (error) throw error;
+        if (!data) throw new Error('Perfil não guardado');
+        location.assign(catalogUrl());
+      } catch(error) { feedback.textContent = 'Não foi possível guardar: ' + error.message; }
+      finally { button.disabled = false; }
+    });
+    document.getElementById('logout').addEventListener('click',async () => {
+      await db.auth.signOut(); location.reload();
+    });
+    checkSession().catch(error => { feedback.textContent = error.message; });
+  </script>
+</body>
+</html>

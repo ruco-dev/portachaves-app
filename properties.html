@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portachaves — Imóveis</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="config.js"></script>
+  <style>
+    body{font-family:system-ui,sans-serif;max-width:850px;margin:40px auto;padding:20px;color:#333}
+    nav{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+    button{font:inherit;cursor:pointer;border:1px solid #555;border-radius:7px;background:#fff;padding:10px 14px}
+    button:disabled{opacity:.6;cursor:wait}
+    #cards{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-top:20px}
+    article{border:1px solid #ddd;border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:7px}
+    article.highlight{border:3px solid #d49200;background:#fff9ea}
+    article h2{margin:0}article p{margin:0}.meta{color:#555}.rent{font-size:1.3rem;font-weight:700}
+    .interest{margin-top:auto;background:#111;color:#fff;border:0}
+    .interest[aria-pressed="true"]{background:#fff;color:#111;border:1px solid #111}
+    [hidden]{display:none!important}
+  </style>
+</head>
+<body>
+  <nav><a href="index.html?editar=1" id="editLink">Editar inscrição</a><a href="owner.html">Área do proprietário</a><a href="dashboard.html">Painel de gestão</a><button id="logout" type="button">Terminar sessão</button></nav>
+  <h1>Imóveis no Portachaves</h1>
+  <p>Veja os detalhes e use a chave para guardar os imóveis que lhe interessam. Pode alterar a escolha a qualquer momento.</p>
+  <label><input id="budgetFilter" type="checkbox"> Mostrar apenas imóveis dentro do meu intervalo de renda</label>
+  <p id="feedback" role="status" aria-live="polite"></p>
+  <section id="cards" aria-label="Imóveis disponíveis"></section>
+  <script>
+    const highlightedId = new URLSearchParams(location.search).get('property_id');
+    const cards = document.getElementById('cards');
+    const feedback = document.getElementById('feedback');
+    if (highlightedId) document.getElementById('editLink').href =
+      'index.html?editar=1&property_id=' + encodeURIComponent(highlightedId);
+
+    function info(text,className) {
+      const p=document.createElement('p'); p.textContent=text;
+      if (className) p.className=className;
+      return p;
+    }
+    function makeCard(property,saved) {
+      const card=document.createElement('article');
+      if (property.id===highlightedId) {
+        card.classList.add('highlight');
+        card.append(info('Imóvel do seu link · Em destaque','meta'));
+      }
+      const heading=document.createElement('h2');
+      heading.textContent=property.title || 'Imóvel sem título';
+      card.append(heading);
+      card.append(info(property.location || 'Localização não indicada','meta'));
+      const rent=property.displayed_rent==null ? null : Number(property.displayed_rent);
+      card.append(info(rent!=null && Number.isFinite(rent) ?
+        rent.toLocaleString('pt-PT',{style:'currency',currency:'EUR'}) + ' / mês' :
+        'Renda não divulgada pelo proprietário','rent'));
+      if (property.description) card.append(info(property.description));
+      card.append(info(property.within_budget ? 'Dentro do seu intervalo de renda' : 'Fora do seu intervalo de renda','meta'));
+      const button=document.createElement('button');
+      button.type='button'; button.className='interest';
+      button.setAttribute('aria-pressed',String(saved.has(property.id)));
+      function label() {
+        const active=button.getAttribute('aria-pressed')==='true';
+        button.textContent=active ? '🗝️ Interesse guardado — retirar' : '🗝️ Tenho interesse';
+        button.setAttribute('aria-label',(active ? 'Retirar interesse em ' : 'Marcar interesse em ') + (property.title || 'imóvel'));
+      }
+      label();
+      button.addEventListener('click',async () => {
+        const next=button.getAttribute('aria-pressed')!=='true';
+        button.disabled=true;
+        try {
+          const {data,error}=await db.rpc('set_property_interest',{p_property_id:property.id,p_interested:next});
+          if (error) throw error;
+          if (data) saved.add(property.id); else saved.delete(property.id);
+          button.setAttribute('aria-pressed',String(data)); label();
+          feedback.textContent=data ? 'Interesse guardado em '+property.title+'.' : 'Interesse retirado de '+property.title+'.';
+        } catch(error) { feedback.textContent='Não foi possível alterar o interesse: '+error.message; }
+        finally { button.disabled=false; }
+      });
+      card.append(button);
+      return card;
+    }
+    async function load() {
+      const {data:{session},error:sessionError}=await db.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!session) { location.replace('index.html'+location.search); return; }
+      const {data:profile,error:profileError}=await db.from('profiles')
+        .select('id,rent_budget_min,rent_budget_max,nationality,document_status').eq('user_id',session.user.id).maybeSingle();
+      if (profileError) throw profileError;
+      if (!profile?.rent_budget_min || !profile?.rent_budget_max || !profile?.nationality ||
+          !['sem_autorizacao','temporaria','permanente'].includes(profile?.document_status)) {
+        location.replace('index.html'+location.search); return;
+      }
+      const [{data:properties,error:propertiesError},{data:interests,error:interestsError}]=await Promise.all([
+        db.rpc('list_available_properties'),
+        db.from('applications').select('property_id').eq('profile_id',profile.id)
+      ]);
+      if (propertiesError) throw propertiesError;
+      if (interestsError) throw interestsError;
+      const saved=new Set((interests||[]).map(item=>item.property_id));
+      properties.sort((a,b)=>
+        Number(b.id===highlightedId)-Number(a.id===highlightedId) ||
+        Number(b.within_budget)-Number(a.within_budget)
+      );
+      function render() {
+        const filtered=document.getElementById('budgetFilter').checked ?
+          properties.filter(property=>property.within_budget) : properties;
+        cards.replaceChildren(...filtered.map(property=>makeCard(property,saved)));
+        if (properties.length && !filtered.length)
+          feedback.textContent='Não há imóveis dentro do intervalo de renda indicado.';
+        else if (feedback.textContent==='Não há imóveis dentro do intervalo de renda indicado.')
+          feedback.textContent='';
+      }
+      document.getElementById('budgetFilter').addEventListener('change',render);
+      render();
+      if (!properties.length) feedback.textContent='Ainda não há imóveis disponíveis.';
+      else if (highlightedId && !properties.some(property=>property.id===highlightedId))
+        feedback.textContent='O imóvel do link já não está disponível. Veja os outros imóveis abaixo.';
+    }
+    document.getElementById('logout').addEventListener('click',async()=>{
+      await db.auth.signOut();location.assign('index.html');
+    });
+    load().catch(error=>{feedback.textContent='Não foi possível carregar os imóveis: '+error.message;});
+  </script>
+</body>
+</html>
